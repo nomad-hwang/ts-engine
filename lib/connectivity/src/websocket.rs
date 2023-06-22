@@ -26,75 +26,14 @@ impl Client {
         // TODO: add connection timeout
 
         let stream = connect_async(url).await?.0;
-        let (mut sink, mut stream) = stream.split();
+        let (sink, stream) = stream.split();
 
         let (recv_tx, recv_rx) = mpsc::unbounded_channel();
-        let (send_tx, mut send_rx) = mpsc::unbounded_channel();
+        let (send_tx, send_rx) = mpsc::unbounded_channel();
 
         let cancel = CancellationToken::new();
-        let cancle_clone = cancel.clone();
 
-        // TODO: think later: what would be better(directly use the sink and stream or use the channels)
-
-        tokio::spawn(async move {
-            let cancel = cancle_clone;
-
-            loop {
-                tokio::select! {
-                    msg = send_rx.recv() => match msg {
-                        Some(msg) => {
-                            if let Err(error) = sink.send(msg).await {
-                                warn!("Error while transmitting message: {}", error);
-                            }
-                        }
-                        None => {
-                            trace!("Received None from send channel");
-                            break;
-                        }
-                    },
-                    msg = stream.next() => match msg {
-                        Some(Ok(Message::Text(_))) | Some(Ok(Message::Binary(_))) => {
-                            if let Err(error) = recv_tx.send(msg.unwrap().unwrap()) {
-                                warn!("Error passing message to receive channel: {}", error);
-                            }
-                        }
-                        Some(Ok(Message::Ping(ping))) => {
-                            if let Err(error) = sink.send(Message::Pong(ping)).await {
-                                warn!("Error sending pong: {}", error);
-                            }
-                        }
-                        Some(Ok(Message::Close(_))) => {
-                            trace!("Received close message");
-                            break;
-                        }
-                        Some(Ok(_)) => { // Pong, Frame, etc.
-                            warn!("Received unexpected message: {:?}", msg);
-                        }
-                        Some(Err(error)) => {
-                            warn!("Error receiving message: {}", error);
-                        }
-                        None => {
-                            trace!("Stream closed by server");
-                            break;
-                        }
-                    },
-                    _ = cancel.cancelled() => {
-                        trace!("Cancelled");
-                        break;
-                    }
-                }
-            }
-
-            trace!("Cleaning up");
-
-            // TODO: Do i need to send remaining messages in send_tx to sink and wait for response?
-
-            let _ = sink.send(Message::Close(None)).await;
-            let _ = sink.close().await;
-
-            // drop channels
-            drop(recv_tx);
-        });
+        tokio::spawn(run(cancel.clone(), send_rx, sink, stream, recv_tx));
 
         Ok(Self {
             send_tx,
@@ -103,39 +42,140 @@ impl Client {
         })
     }
 
-    pub async fn disconnect(&self) {
+    pub fn disconnect(&self) {
         self.cancel.cancel();
     }
 
-    pub async fn send(&self, message: &str) -> Result<()> {
-        self.send_tx.send(Message::Text(message.to_owned()))?;
+    /// Returns error if the connection is closed
+    pub fn send(&self, message: String) -> Result<()> {
+        self.send_tx.send(Message::Text(message))?;
         Ok(())
     }
 
+    pub fn send_binary(&self, message: Vec<u8>) -> Result<()> {
+        self.send_tx.send(Message::Binary(message))?;
+        Ok(())
+    }
+
+    /// Returns None if the connection is closed
     pub async fn receive(&mut self) -> Option<Message> {
         self.recv_rx.recv().await
     }
 }
 
-// Test with wss://echo.websocket.org
+async fn run(
+    cancel: CancellationToken,
+    mut send_rx: mpsc::UnboundedReceiver<Message>,
+    mut sink: futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Message,
+    >,
+    mut stream: futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+    recv_tx: mpsc::UnboundedSender<Message>,
+) {
+    loop {
+        tokio::select! {
+            msg = send_rx.recv() => match msg {
+                Some(msg) => {
+                    if let Err(error) = sink.send(msg).await {
+                        warn!("Error while transmitting message: {}", error);
+                    }
+                }
+                None => {
+                    trace!("Received None from send channel");
+                    break;
+                }
+            },
+            msg = stream.next() => match msg {
+                Some(Ok(msg)) => match msg {
+                    Message::Text(_) | Message::Binary(_) => {
+                        if let Err(error) = recv_tx.send(msg) {
+                            warn!("Error passing message to receive channel: {}", error);
+                        }
+                    }
+                    Message::Ping(data) => {
+                        if let Err(error) = sink.send(Message::Pong(data)).await {
+                            warn!("Error sending pong: {}", error);
+                        }
+                    }
+                    Message::Close(_) => {
+                        trace!("Received close message");
+                        break;
+                    }
+                    _ => {
+                        warn!("Received unexpected message: {:?}", msg);
+                    }
+                },
+                Some(Err(error)) => {
+                    warn!("Error receiving message: {}", error);
+                }
+                None => {
+                    trace!("Stream closed by server");
+                    break;
+                }
+            },
+            _ = cancel.cancelled() => {
+                trace!("Cancelled");
+                break;
+            }
+        }
+    }
+    trace!("Cleaning up");
+    let _ = sink.send(Message::Close(None)).await;
+    let _ = sink.close().await;
+    drop(recv_tx);
+}
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
-    // use std::time::Duration;
-    // use tokio::time::sleep;
 
     #[tokio::test]
     async fn test() {
-        // binance wss
-        let mut client = Client::new("wss://stream.binance.com:9443/ws/btcusdt@trade")
+        // TODO: replace test with local server later
+
+        let mut client = Client::new("wss://stream.binance.com:9443/ws")
             .await
             .unwrap();
 
-        // receive
-        let msg = client.receive().await.unwrap();
-        println!("Received: {:?}", msg);
+        // Subscribe to btcusdt@depth@100ms
+        client
+            .send(r#"{"method": "SUBSCRIBE","params": ["btcusdt@depth@100ms"],"id": 1}"#.to_owned())
+            .unwrap();
 
-        // TODO: add more tests
+        // Should get result of subscription
+        let msg = client.receive().await.unwrap();
+        assert_eq!(msg, Message::Text(r#"{"result":null,"id":1}"#.to_owned()));
+
+        // Give some time to receive messages and then disconnect
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        client.disconnect();
+
+        let mut received = false;
+        loop {
+            let msg = client.receive().await;
+            if msg.is_none() {
+                break;
+            }
+
+            let msg: Value = serde_json::from_str(msg.unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(msg["e"], "depthUpdate");
+            assert_eq!(msg["s"], "BTCUSDT");
+
+            received = true;
+        }
+        assert!(received);
+
+        // try to send message after disconnect
+        let result = client.send("test".to_owned());
+        assert!(result.is_err());
     }
 }

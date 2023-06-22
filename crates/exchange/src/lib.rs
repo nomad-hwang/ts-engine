@@ -1,14 +1,25 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
+pub mod crypto;
+pub mod error;
+
+use async_trait::async_trait;
+use domain::{orderbook::OrderBookUpdate, pair::Pair, trade::Trade};
+use error::Result;
+
+pub enum Event {
+    Trade(Trade),
+    OrderBookUpdate(OrderBookUpdate),
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[async_trait]
+pub trait Client {
+    async fn get_all_pairs(&self) -> Result<Vec<Pair>>;
+}
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+#[async_trait]
+pub trait Stream {
+    async fn subscribe(&mut self, pairs: Vec<Pair>) -> Result<()>;
+    async fn unsubscribe(&mut self, pairs: Vec<Pair>) -> Result<()>;
+    async fn get_subscription(&self) -> Result<Vec<Pair>>;
+
+    async fn next_event(&mut self) -> Result<Event>;
 }

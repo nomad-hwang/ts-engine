@@ -1,0 +1,8 @@
+{
+    "conventionalCommits.scopes": [
+        "ws"
+    ],
+    "rust-analyzer.linkedProjects": [
+        "./crates/domain/Cargo.toml"
+    ]
+}

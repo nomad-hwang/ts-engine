@@ -13,7 +13,11 @@
 			"version": "latest",
 			"profile": "minimal"
 		}
-	}
+	},
+
+	"postCreateCommand": [
+		"apt-get update && apt-get install -y bash-completion"
+	]
 
 	// Features to add to the dev container. More info: https://containers.dev/features.
 	// "features": {},
