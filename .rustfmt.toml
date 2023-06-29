@@ -1,0 +1,4 @@
+
+# set 'enum_discrim_align_threshold' to 0.0
+# comment_width = 80
+match_block_trailing_comma = true

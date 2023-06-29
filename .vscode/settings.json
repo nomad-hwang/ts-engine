@@ -3,6 +3,6 @@
         "ws"
     ],
     "rust-analyzer.linkedProjects": [
-        "./crates/domain/Cargo.toml"
+        "./lib/domain/Cargo.toml"
     ]
 }

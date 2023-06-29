@@ -14,4 +14,4 @@ tokio = { version = "1.28.0", default-features = false, features = ["full"] }
 tokio-util = "0.7"
 async-trait = "0.1"
 
-domain = { path = "../domain" }
+domain = { path = "../../lib/domain" }
